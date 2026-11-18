@@ -7,6 +7,17 @@ $BreakSec = 20
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# Native helpers: read Esc even when the overlay has no keyboard focus, and force focus onto the overlay
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class EyeNative {
+    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+}
+"@
+
 $created = $false
 $mutex = New-Object System.Threading.Mutex($true, 'Global\EyeBreak202020', [ref]$created)
 if (-not $created) { exit }
@@ -128,7 +139,15 @@ function Refresh {
 
     if ($inBreak) {
         $ovCount.Text = [string][int][math]::Ceiling($left.TotalSeconds)
-        if (-not $ov.Visible) { $ov.Show(); $ov.Activate() }
+        if (-not $ov.Visible) {
+            $ov.Show()
+            # A tapped Alt lets a background app take foreground, so the overlay can receive keys
+            [EyeNative]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
+            [EyeNative]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
+            [void][EyeNative]::SetForegroundWindow($ov.Handle)
+            $ov.Activate()
+            [void]$ov.Focus()
+        }
         if ($form.Visible) { $form.Hide() }
     } else {
         if ($ov.Visible) { $ov.Hide() }
@@ -188,6 +207,16 @@ $quitItem.Add_Click({
     [System.Windows.Forms.Application]::Exit()
 })
 $icon.Add_DoubleClick({ $script:userHidden = $false; $showItem.Text = 'Hide timer chip'; Refresh })
+
+# Fast Esc check during the break (works even if the overlay is not focused)
+$escTimer = New-Object System.Windows.Forms.Timer
+$escTimer.Interval = 50
+$escTimer.Add_Tick({
+    if ($script:phase -eq 'break' -and $ov.Visible -and (([EyeNative]::GetAsyncKeyState(0x1B) -band 0x8000) -ne 0)) {
+        StartPhase 'work'
+    }
+})
+$escTimer.Start()
 
 $timer.Start()
 Refresh
