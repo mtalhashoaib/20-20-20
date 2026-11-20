@@ -7,16 +7,36 @@ $BreakSec = 20
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# Native helpers: read Esc even when the overlay has no keyboard focus, and force focus onto the overlay
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class EyeNative {
-    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+# Log file for diagnosing problems: %APPDATA%\EyeBreak\log.txt
+function Log($m) {
+    try { Add-Content -Path (Join-Path $env:APPDATA 'EyeBreak\log.txt') -Value ("{0}  {1}" -f (Get-Date), $m) } catch {}
 }
-"@
+
+# Native helpers: read Esc even when the overlay has no keyboard focus, and force focus onto the overlay
+try {
+    Add-Type -Namespace Eye -Name Native -MemberDefinition @'
+[DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid);
+[DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
+[DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+'@
+} catch { Log "Add-Type failed: $($_.Exception.Message)" }
+
+function ForceFocus($h) {
+    try {
+        $pid2 = [uint32]0
+        $fg = [Eye.Native]::GetForegroundWindow()
+        $fgThread = [Eye.Native]::GetWindowThreadProcessId($fg, [ref]$pid2)
+        $myThread = [Eye.Native]::GetCurrentThreadId()
+        if ($fgThread -ne $myThread) { [void][Eye.Native]::AttachThreadInput($myThread, $fgThread, $true) }
+        [void][Eye.Native]::BringWindowToTop($h)
+        [void][Eye.Native]::SetForegroundWindow($h)
+        if ($fgThread -ne $myThread) { [void][Eye.Native]::AttachThreadInput($myThread, $fgThread, $false) }
+    } catch { Log "ForceFocus failed: $($_.Exception.Message)" }
+}
 
 $created = $false
 $mutex = New-Object System.Threading.Mutex($true, 'Global\EyeBreak202020', [ref]$created)
@@ -117,7 +137,7 @@ $skipBtn.Top       = ($ps.Y - $vs.Y) + [int]($ps.Height * 0.74)
 $skipBtn.Add_Click({ StartPhase 'work' })
 $ov.Controls.Add($skipBtn)
 
-$ov.Add_KeyDown({ if ($_.KeyCode -eq 'Escape') { StartPhase 'work' } })
+$ov.Add_KeyDown({ if ($_.KeyCode -eq 'Escape') { Log 'Esc detected by KeyDown'; StartPhase 'work' } })
 
 function StartPhase($p) {
     $script:phase = $p
@@ -141,10 +161,7 @@ function Refresh {
         $ovCount.Text = [string][int][math]::Ceiling($left.TotalSeconds)
         if (-not $ov.Visible) {
             $ov.Show()
-            # A tapped Alt lets a background app take foreground, so the overlay can receive keys
-            [EyeNative]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
-            [EyeNative]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero)
-            [void][EyeNative]::SetForegroundWindow($ov.Handle)
+            ForceFocus $ov.Handle
             $ov.Activate()
             [void]$ov.Focus()
         }
@@ -212,9 +229,12 @@ $icon.Add_DoubleClick({ $script:userHidden = $false; $showItem.Text = 'Hide time
 $escTimer = New-Object System.Windows.Forms.Timer
 $escTimer.Interval = 50
 $escTimer.Add_Tick({
-    if ($script:phase -eq 'break' -and $ov.Visible -and (([EyeNative]::GetAsyncKeyState(0x1B) -band 0x8000) -ne 0)) {
-        StartPhase 'work'
-    }
+    try {
+        if ($script:phase -eq 'break' -and $ov.Visible -and (([Eye.Native]::GetAsyncKeyState(0x1B) -band 0x8000) -ne 0)) {
+            Log 'Esc detected by poller'
+            StartPhase 'work'
+        }
+    } catch { Log "escTimer error: $($_.Exception.Message)" }
 })
 $escTimer.Start()
 
