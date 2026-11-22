@@ -123,21 +123,34 @@ $ovCount = AddOvLabel '20' 120 (C 255 255 255) 0.46 210 $true
 $null = AddOvLabel 'or press Esc' 13 (C 100 116 139) 0.84 40 $false
 
 # Skip button (e.g. while presenting): closes the overlay and restarts the 20:00 timer
-$skipBtn = New-Object System.Windows.Forms.Button
-$skipBtn.Text      = 'Skip break'
-$skipBtn.Font      = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold)
-$skipBtn.Size      = New-Object System.Drawing.Size(220, 56)
-$skipBtn.FlatStyle = 'Flat'
-$skipBtn.FlatAppearance.BorderColor = C 100 116 139
-$skipBtn.BackColor = C 30 41 59
-$skipBtn.ForeColor = C 226 232 240
-$skipBtn.Cursor    = [System.Windows.Forms.Cursors]::Hand
-$skipBtn.Left      = ($ps.X - $vs.X) + [int](($ps.Width - 220) / 2)
-$skipBtn.Top       = ($ps.Y - $vs.Y) + [int]($ps.Height * 0.74)
-$skipBtn.Add_Click({ StartPhase 'work' })
+# A Label (not a Button) so it can never take keyboard focus: Space/Enter/other keys can't trigger it.
+$script:overlayShown = [DateTime]::MinValue
+$skipBtn = New-Object System.Windows.Forms.Label
+$skipBtn.Text        = 'Skip break'
+$skipBtn.TextAlign   = 'MiddleCenter'
+$skipBtn.Font        = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold)
+$skipBtn.Size        = New-Object System.Drawing.Size(220, 56)
+$skipBtn.BorderStyle = 'FixedSingle'
+$skipBtn.BackColor   = C 30 41 59
+$skipBtn.ForeColor   = C 226 232 240
+$skipBtn.Cursor      = [System.Windows.Forms.Cursors]::Hand
+$skipBtn.Left        = ($ps.X - $vs.X) + [int](($ps.Width - 220) / 2)
+$skipBtn.Top         = ($ps.Y - $vs.Y) + [int]($ps.Height * 0.74)
+$skipBtn.Add_MouseUp({
+    # Only a real left click ON the button, and not in the first 1.5s (accidental clicks as the overlay appears)
+    if ($_.Button -eq 'Left' -and $_.X -ge 0 -and $_.Y -ge 0 -and $_.X -lt $skipBtn.Width -and $_.Y -lt $skipBtn.Height `
+        -and (([DateTime]::Now - $script:overlayShown).TotalMilliseconds -gt 1500)) {
+        Log 'Skip clicked'
+        StartPhase 'work'
+    }
+})
 $ov.Controls.Add($skipBtn)
 
-$ov.Add_KeyDown({ if ($_.KeyCode -eq 'Escape') { Log 'Esc detected by KeyDown'; StartPhase 'work' } })
+# Esc handled here; every other key is swallowed so nothing else can skip the break.
+$ov.Add_KeyDown({
+    if ($_.KeyCode -eq 'Escape') { Log 'Esc detected by KeyDown'; StartPhase 'work' }
+    $_.Handled = $true; $_.SuppressKeyPress = $true
+})
 
 function StartPhase($p) {
     $script:phase = $p
@@ -160,6 +173,7 @@ function Refresh {
     if ($inBreak) {
         $ovCount.Text = [string][int][math]::Ceiling($left.TotalSeconds)
         if (-not $ov.Visible) {
+            $script:overlayShown = [DateTime]::Now
             $ov.Show()
             ForceFocus $ov.Handle
             $ov.Activate()
